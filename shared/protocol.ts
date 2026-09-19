@@ -21,6 +21,22 @@ export function canAnnotate(role: Role): boolean {
   return role === 'editor' || role === 'commenter'
 }
 
+/**
+ * 将不可信来源的光标坐标规整为合法位置：
+ * 数字与纯数字字符串转换为整数并夹取到 [0, docLen]；
+ * 其余输入（NaN、Infinity、非数字字符串、null、对象等）返回 null，调用方应拒绝或丢弃。
+ */
+export function sanitizeCursorPos(value: unknown, docLen: number): number | null {
+  const n =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.trim() !== ''
+        ? Number(value)
+        : NaN
+  if (!Number.isFinite(n)) return null
+  return Math.max(0, Math.min(Math.round(n), Math.max(0, docLen)))
+}
+
 export interface UserInfo {
   clientId: string
   name: string

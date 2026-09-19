@@ -9,6 +9,7 @@
  */
 import { ElMessage } from 'element-plus'
 import { apply, diffToOp, isNoop, mapPosition, type Op } from '../../../shared/ot'
+import { sanitizeCursorPos } from '../../../shared/protocol'
 import type {
   Annotation,
   ErrorMsg,
@@ -228,9 +229,15 @@ class Collab {
         session.setUsers(msg.users)
         break
 
-      case 'cursor':
-        session.cursors[msg.clientId] = { start: msg.start, end: msg.end }
+      case 'cursor': {
+        // 边界保护：远程坐标统一规整到当前文档范围内，非法值直接丢弃，
+        // 避免 NaN / 越界坐标污染高亮分层计算（EditorView 渲染时另有夹取兜底）
+        const s = sanitizeCursorPos(msg.start, doc.text.length)
+        const e = sanitizeCursorPos(msg.end, doc.text.length)
+        if (s === null || e === null) break
+        session.cursors[msg.clientId] = s <= e ? { start: s, end: e } : { start: e, end: s }
         break
+      }
 
       case 'error':
         this.onError(msg)

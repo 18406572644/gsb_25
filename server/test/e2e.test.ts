@@ -326,3 +326,71 @@ test('e2e: 畸形消息不炸服务器', async () => {
   assert.equal(welcome.type, 'welcome')
   ws.close()
 })
+
+test('e2e: 光标坐标校验 —— 越界夹取、字符串转换、非法坐标拒绝且不传播', async () => {
+  const docId = 'e2e-cursor'
+  const a = new TestClient('A', 'editor', docId)
+  const b = new TestClient('B', 'editor', docId)
+  await a.join()
+  await b.join()
+
+  // 文档长度固定为 5（'hello'）
+  a.edit([{ insert: 'hello' }])
+  await a.waitFor((m) => m.type === 'ack')
+  await b.waitFor((m) => m.type === 'op')
+
+  type CursorMsg = { type: 'cursor'; clientId: string; start: number; end: number }
+  const cursorFrom = (m: ServerMsg, clientId: string) =>
+    m.type === 'cursor' && (m as unknown as CursorMsg).clientId === clientId
+
+  // 负数坐标 → 夹取到 0
+  a.send({ type: 'cursor', start: -3, end: -1 })
+  let cur = (await b.waitFor((m) => cursorFrom(m, a.clientId))) as unknown as CursorMsg
+  assert.deepEqual([cur.start, cur.end], [0, 0])
+
+  // 超出文档长度 → 夹取到 doc.length
+  a.send({ type: 'cursor', start: 2, end: 9999 })
+  cur = (await b.waitFor((m) => cursorFrom(m, a.clientId) && (m as unknown as CursorMsg).end === 5)) as unknown as CursorMsg
+  assert.deepEqual([cur.start, cur.end], [2, 5])
+
+  // start > end → 自动排序
+  a.send({ type: 'cursor', start: 4, end: 1 })
+  cur = (await b.waitFor(
+    (m) => cursorFrom(m, a.clientId) && (m as unknown as CursorMsg).start === 1 && (m as unknown as CursorMsg).end === 4,
+  )) as unknown as CursorMsg
+  assert.deepEqual([cur.start, cur.end], [1, 4])
+
+  // 数字字符串坐标 → 转换为数字
+  a.send({ type: 'cursor', start: '2', end: '4' })
+  cur = (await b.waitFor(
+    (m) => cursorFrom(m, a.clientId) && (m as unknown as CursorMsg).start === 2 && (m as unknown as CursorMsg).end === 4,
+  )) as unknown as CursorMsg
+  assert.deepEqual([cur.start, cur.end], [2, 4])
+
+  // 非法坐标（非数字字符串 / null / 对象 / 缺失字段）→ BAD_MESSAGE，且不广播给其他客户端
+  const badPayloads: object[] = [
+    { type: 'cursor', start: 'abc', end: 1 },
+    { type: 'cursor', start: null, end: 2 },
+    { type: 'cursor', start: {}, end: 2 },
+    { type: 'cursor' },
+  ]
+  for (const payload of badPayloads) {
+    const cursorCountBefore = b.inbox.filter((m) => m.type === 'cursor').length
+    a.send(payload)
+    const err = await a.waitFor((m) => m.type === 'error')
+    assert.equal((err as { code: string }).code, 'BAD_MESSAGE')
+    // 非法光标不传播：等待一拍确认 B 的 cursor 消息数没有增加
+    await new Promise((r) => setTimeout(r, 150))
+    assert.equal(b.inbox.filter((m) => m.type === 'cursor').length, cursorCountBefore)
+  }
+
+  // 服务端未受非法消息影响：正常光标仍能广播，坐标保持合法
+  a.send({ type: 'cursor', start: 1, end: 3 })
+  cur = (await b.waitFor(
+    (m) => cursorFrom(m, a.clientId) && (m as unknown as CursorMsg).start === 1 && (m as unknown as CursorMsg).end === 3,
+  )) as unknown as CursorMsg
+  assert.deepEqual([cur.start, cur.end], [1, 3])
+
+  a.close()
+  b.close()
+})
