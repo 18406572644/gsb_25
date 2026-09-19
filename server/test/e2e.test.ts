@@ -326,3 +326,92 @@ test('e2e: 畸形消息不炸服务器', async () => {
   assert.equal(welcome.type, 'welcome')
   ws.close()
 })
+
+test('e2e: 光标坐标校验 —— 负数/超长截断，字符串/布尔/缺字段拒绝且不广播', async () => {
+  const docId = 'e2e-cursor-valid'
+  const a = new TestClient('A', 'editor', docId)
+  const b = new TestClient('B', 'viewer', docId)
+  await a.join()
+  await b.join()
+
+  // 构造长度已知的文档
+  a.edit([{ insert: 'abcdef' }])
+  await a.waitFor((m) => m.type === 'ack')
+  await b.waitFor((m) => m.type === 'op')
+  await new Promise((r) => setTimeout(r, 100))
+
+  type CursorMsg = { type: 'cursor'; clientId: string; start: number; end: number }
+  const cursorFromA = (m: ServerMsg) =>
+    m.type === 'cursor' && (m as CursorMsg).clientId === a.clientId
+
+  // 1) 负数坐标 → 截断到 0（双向归一化后仍为 0）
+  a.send({ type: 'cursor', start: -5, end: -10 })
+  const c1 = (await b.waitFor(
+    (m) => cursorFromA(m) && (m as CursorMsg).start === 0 && (m as CursorMsg).end === 0,
+  )) as CursorMsg
+  assert.equal(c1.start, 0)
+  assert.equal(c1.end, 0)
+
+  // 2) 超出文档长度 → 截断到 6；start > end 时归一化顺序
+  a.send({ type: 'cursor', start: 9999, end: 2 })
+  const c2 = (await b.waitFor(
+    (m) => cursorFromA(m) && (m as CursorMsg).start === 2 && (m as CursorMsg).end === 6,
+  )) as CursorMsg
+  assert.equal(c2.start, 2)
+  assert.equal(c2.end, 6)
+
+  // 3) 正常坐标原样透传
+  a.send({ type: 'cursor', start: 1, end: 3 })
+  const c3 = (await b.waitFor(
+    (m) => cursorFromA(m) && (m as CursorMsg).start === 1 && (m as CursorMsg).end === 3,
+  )) as CursorMsg
+  assert.equal(c3.start, 1)
+  assert.equal(c3.end, 3)
+
+  // 4) 非法坐标（字符串 / 布尔 / 缺失字段）→ BAD_MESSAGE，且不向其他客户端广播
+  const nextMsg = (cl: TestClient) =>
+    new Promise<ServerMsg>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('等待下一条消息超时')), 3000)
+      cl.ws.once('message', (raw) => {
+        clearTimeout(timer)
+        resolve(JSON.parse(raw.toString()) as ServerMsg)
+      })
+    })
+  const cursorCountBefore = b.inbox.filter(cursorFromA).length
+
+  a.send({ type: 'cursor', start: '1', end: 3 })
+  const errStr = await nextMsg(a)
+  assert.equal(errStr.type, 'error')
+  assert.equal((errStr as { code: string }).code, 'BAD_MESSAGE')
+
+  a.send({ type: 'cursor', start: 2, end: true })
+  const errBool = await nextMsg(a)
+  assert.equal((errBool as { code: string }).code, 'BAD_MESSAGE')
+
+  a.send({ type: 'cursor', start: null, end: 3 })
+  const errNull = await nextMsg(a)
+  assert.equal((errNull as { code: string }).code, 'BAD_MESSAGE')
+
+  a.send({ type: 'cursor' })
+  const errMissing = await nextMsg(a)
+  assert.equal((errMissing as { code: string }).code, 'BAD_MESSAGE')
+
+  await new Promise((r) => setTimeout(r, 150))
+  assert.equal(b.inbox.filter(cursorFromA).length, cursorCountBefore, '非法光标不应被广播')
+
+  // 5) 服务端未受影响：非法消息后正常坐标仍可广播，且新客户端能正常加入
+  a.send({ type: 'cursor', start: 4, end: 5 })
+  const c5 = (await b.waitFor(
+    (m) => cursorFromA(m) && (m as CursorMsg).start === 4 && (m as CursorMsg).end === 5,
+  )) as CursorMsg
+  assert.equal(c5.start, 4)
+  assert.equal(c5.end, 5)
+
+  const c = new TestClient('C', 'editor', docId)
+  await c.join()
+  assert.equal(c.doc, 'abcdef')
+
+  a.close()
+  b.close()
+  c.close()
+})

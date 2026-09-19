@@ -207,7 +207,8 @@ wss.on('connection', (ws: WebSocket) => {
 
         case 'cursor': {
           if (!session || !client) return
-          session.updateCursor(client, msg.start, msg.end)
+          const err = session.updateCursor(client, msg.start, msg.end)
+          if (err) send({ type: 'error', code: err.code, message: err.message })
           break
         }
 

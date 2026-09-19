@@ -18,6 +18,7 @@ import type {
   ServerMsg,
   WelcomeMsg,
 } from '../../../shared/protocol'
+import { sanitizeCursorRange } from '../../../shared/protocol'
 import { WSClient } from '@/ws/wsClient'
 import { OTClient } from '@/ot/otClient'
 import { useSessionStore } from '@/stores/session'
@@ -228,9 +229,16 @@ class Collab {
         session.setUsers(msg.users)
         break
 
-      case 'cursor':
-        session.cursors[msg.clientId] = { start: msg.start, end: msg.end }
+      case 'cursor': {
+        // 边界保护：服务端已做校验，这里再按本地文档长度防御一次，非法坐标直接丢弃
+        const range = sanitizeCursorRange(msg.start, msg.end, doc.text.length)
+        if (!range) {
+          console.warn('[collab] 丢弃非法远程光标:', msg.clientId, msg.start, msg.end)
+          break
+        }
+        session.cursors[msg.clientId] = range
         break
+      }
 
       case 'error':
         this.onError(msg)

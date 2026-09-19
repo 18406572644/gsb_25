@@ -233,3 +233,32 @@ export type ServerMsg =
   | AnnDeletedMsg
   | ErrorMsg
   | PongMsg
+
+/* ---------------- 光标坐标校验（服务端入库前 + 客户端接收后双重防护） ---------------- */
+
+/**
+ * 将客户端上报的单个坐标转换为合法数字：
+ * - 非数字类型 / NaN / Infinity 等非有限值 → null（消息非法）
+ * - 合法数字截断为整数，并限制在 [0, docLength] 范围内
+ */
+export function sanitizeCursorCoord(v: unknown, docLength: number): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null
+  const n = Math.trunc(v)
+  return Math.max(0, Math.min(n, docLength))
+}
+
+/**
+ * 校验并归一化光标区间。
+ * 任一坐标非法时返回 null（调用方应返回 BAD_MESSAGE 或直接丢弃）；
+ * 合法时统一为 start <= end，且均落在 [0, docLength] 内。
+ */
+export function sanitizeCursorRange(
+  start: unknown,
+  end: unknown,
+  docLength: number,
+): { start: number; end: number } | null {
+  const s = sanitizeCursorCoord(start, docLength)
+  const e = sanitizeCursorCoord(end, docLength)
+  if (s === null || e === null) return null
+  return { start: Math.min(s, e), end: Math.max(s, e) }
+}

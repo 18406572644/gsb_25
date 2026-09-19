@@ -7,7 +7,7 @@ import {
   type Op,
 } from '../../shared/ot'
 import type { Annotation, LogEntry, Role, UserInfo } from '../../shared/protocol'
-import { canAnnotate, canEdit } from '../../shared/protocol'
+import { canAnnotate, canEdit, sanitizeCursorRange } from '../../shared/protocol'
 
 /** 服务端操作日志保留长度：超出后落后太多的客户端只能走全量快照回滚 */
 export const LOG_LIMIT = 1000
@@ -272,10 +272,27 @@ export class DocSession {
     return null
   }
 
-  updateCursor(client: ClientState, start: number, end: number) {
-    client.cursor = { start, end }
-    // 光标消息易失：不计 seq、不持久化，直接转发
-    this.broadcast({ type: 'cursor', clientId: client.clientId, start, end }, client.clientId)
+  /**
+   * 处理客户端光标上报。
+   * 坐标统一转换为合法整数并限制在当前文档长度范围内；非法消息（非数字 / NaN / Infinity）
+   * 返回 BAD_MESSAGE，不存储、不广播，避免异常位置传播到其他客户端。
+   */
+  updateCursor(
+    client: ClientState,
+    start: unknown,
+    end: unknown,
+  ): { code: 'BAD_MESSAGE'; message: string } | null {
+    const range = sanitizeCursorRange(start, end, this.doc.length)
+    if (!range) {
+      return { code: 'BAD_MESSAGE', message: '光标坐标非法' }
+    }
+    client.cursor = range
+    // 光标消息易失：不计 seq、不持久化，转发归一化后的坐标
+    this.broadcast(
+      { type: 'cursor', clientId: client.clientId, start: range.start, end: range.end },
+      client.clientId,
+    )
+    return null
   }
 
   /**
